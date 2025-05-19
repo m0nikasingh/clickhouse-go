@@ -212,6 +212,13 @@ func (ch *clickhouse) Stats() driver.Stats {
 	}
 }
 
+func getCurrentAddrs(opt *Options) []string {
+	if opt.SRVResolver != nil {
+		return opt.SRVResolver.GetAddrs()
+	}
+	return opt.Addr
+}
+
 func (ch *clickhouse) dial(ctx context.Context) (conn *connect, err error) {
 	connID := int(atomic.AddInt64(&ch.connID, 1))
 
@@ -234,19 +241,20 @@ func (ch *clickhouse) dial(ctx context.Context) (conn *connect, err error) {
 }
 
 func DefaultDialStrategy(ctx context.Context, connID int, opt *Options, dial Dial) (r DialResult, err error) {
-	for i := range opt.Addr {
+	addrs := getCurrentAddrs(opt)
+	for i := range addrs {
 		var num int
 		switch opt.ConnOpenStrategy {
 		case ConnOpenInOrder:
 			num = i
 		case ConnOpenRoundRobin:
-			num = (connID + i) % len(opt.Addr)
+			num = (connID + i) % len(addrs)
 		case ConnOpenRandom:
 			random := rand.Int()
-			num = (random + i) % len(opt.Addr)
+			num = (random + i) % len(addrs)
 		}
 
-		if r, err = dial(ctx, opt.Addr[num], opt); err == nil {
+		if r, err = dial(ctx, addrs[num], opt); err == nil {
 			return r, nil
 		}
 	}
@@ -375,3 +383,4 @@ func (ch *clickhouse) Close() error {
 		}
 	}
 }
+

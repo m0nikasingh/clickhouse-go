@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/ch-go/compress"
@@ -114,6 +115,21 @@ func (p Protocol) String() string {
 	}
 }
 
+var lookupSRV func(service, proto, name string) (string, []*net.SRV, error) = net.LookupSRV
+
+func lookupSRVRecords(name string) ([]string, error) {
+	_, addrs, err := lookupSRV("", "", name)
+	if err != nil {
+		return nil, err
+	}
+	var hosts []string
+	for _, srv := range addrs {
+		target := strings.TrimSuffix(srv.Target, ".")
+		hosts = append(hosts, net.JoinHostPort(target, strconv.Itoa(int(srv.Port))))
+	}
+	return hosts, nil
+}
+
 func ParseDSN(dsn string) (*Options, error) {
 	opt := &Options{}
 	if err := opt.fromDSN(dsn); err != nil {
@@ -135,6 +151,7 @@ type Options struct {
 
 	TLS                  *tls.Config
 	Addr                 []string
+	SRVResolver          *SRVResolver
 	Auth                 Auth
 	DialContext          func(ctx context.Context, addr string) (net.Conn, error)
 	DialStrategy         func(ctx context.Context, connID int, options *Options, dial Dial) (DialResult, error)
@@ -166,6 +183,56 @@ type Options struct {
 	ReadTimeout time.Duration
 }
 
+type SRVResolver struct {
+	srvName    string
+	refreshTTL time.Duration
+	addrs      atomic.Value // holds []string
+	stop       chan struct{}
+}
+
+func NewSRVResolver(name string, ttl time.Duration) *SRVResolver {
+	r := &SRVResolver{
+		srvName:    name,
+		refreshTTL: ttl,
+		stop:       make(chan struct{}),
+	}
+	r.refresh() // initial fetch
+	go r.loop()
+	return r
+}
+
+func (r *SRVResolver) loop() {
+	ticker := time.NewTicker(r.refreshTTL)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.refresh()
+		case <-r.stop:
+			return
+		}
+	}
+}
+
+func (r *SRVResolver) refresh() {
+	addrs, err := lookupSRVRecords(r.srvName)
+	if err == nil && len(addrs) > 0 {
+		r.addrs.Store(addrs)
+	}
+}
+
+func (r *SRVResolver) GetAddrs() []string {
+	if v := r.addrs.Load(); v != nil {
+		return v.([]string)
+	}
+	return nil
+}
+
+func (r *SRVResolver) Stop() {
+	close(r.stop)
+}
+
 func (o *Options) fromDSN(in string) error {
 	dsn, err := url.Parse(in)
 	if err != nil {
@@ -183,13 +250,38 @@ func (o *Options) fromDSN(in string) error {
 		o.Auth.Username = dsn.User.Username()
 		o.Auth.Password, _ = dsn.User.Password()
 	}
-	o.Addr = append(o.Addr, strings.Split(dsn.Host, ",")...)
 	var (
 		secure     bool
 		params     = dsn.Query()
 		skipVerify bool
+		srvLookup  bool
 	)
 	o.Auth.Database = strings.TrimPrefix(dsn.Path, "/")
+
+	// Check for srv_lookup param
+	if v := params.Get("srv_lookup"); v != "" {
+		srvLookup, _ = strconv.ParseBool(v)
+	}
+
+	if srvLookup {
+		service := params.Get("srv_service")
+		proto := params.Get("srv_proto")
+		var srvHost string
+		if service != "" && proto != "" {
+			srvHost = "_" + service + "._" + proto + "." + dsn.Host
+		} else if strings.HasPrefix(dsn.Host, "_") {
+			srvHost = dsn.Host
+		} else {
+			// Default to _clickhouse._tcp if not specified
+			srvHost = "_clickhouse._tcp." + dsn.Host
+		}
+
+		resolver := NewSRVResolver(srvHost, 1*time.Minute) // configurable TTL
+		o.SRVResolver = resolver
+		o.Addr = resolver.GetAddrs()
+	} else {
+		o.Addr = append(o.Addr, strings.Split(dsn.Host, ",")...)
+	}
 
 	for v := range params {
 		switch v {
