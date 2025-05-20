@@ -19,7 +19,6 @@ package clickhouse
 
 import (
 	"crypto/tls"
-	"net"
 	"net/url"
 	"testing"
 	"time"
@@ -28,22 +27,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	originalLookupSRV = net.LookupSRV
-)
-
-func mockLookupSRV(_ string) (string, []*net.SRV, error) {
-	return "", []*net.SRV{
-		{Target: "host1.example.com.", Port: 9000},
-		{Target: "host2.example.com.", Port: 9001},
-	}, nil
-}
-
 // TestParseDSN does not implement all use cases yet
 func TestParseDSN(t *testing.T) {
-	originalLookupSRV := lookupSRV
-	defer func() { lookupSRV = originalLookupSRV }()
-
 	testCases := []struct {
 		name        string
 		dsn         string
@@ -509,80 +494,6 @@ func TestParseDSN(t *testing.T) {
 					Database: `bla`,
 				},
 				scheme: "tcp",
-			},
-			"",
-		},
-		{
-			"native protocol with srv_lookup",
-			"clickhouse://user:pass@mydomain.com/test_database?srv_lookup=true",
-			&Options{
-				Protocol: Native,
-				TLS:      nil,
-				Addr:     []string{"host1.example.com:9000", "host2.example.com:9001"},
-				Settings: Settings{},
-				Auth: Auth{
-					Database: "test_database",
-					Username: "user",
-					Password: "pass",
-				},
-				scheme: "clickhouse",
-			},
-			"",
-		},
-		{
-			"native protocol with fully qualified SRV name",
-			"clickhouse://user:pass@_custom._tcp.example.com/test_database?srv_lookup=true",
-			&Options{
-				Protocol: Native,
-				TLS:      nil,
-				Addr:     []string{"host1.example.com:9000", "host2.example.com:9001"},
-				Settings: Settings{},
-				Auth: Auth{
-					Database: "test_database",
-					Username: "user",
-					Password: "pass",
-				},
-				scheme: "clickhouse",
-			},
-			"",
-		},
-		{
-			"native protocol with custom srv_service and srv_proto",
-			"clickhouse://user:pass@mydomain.com/test_database?srv_lookup=true&srv_service=srv&srv_proto=udp",
-			&Options{
-				Protocol: Native,
-				TLS:      nil,
-				Addr:     []string{"host1.example.com:9000", "host2.example.com:9001"},
-				Settings: Settings{},
-				Auth: Auth{
-					Database: "test_database",
-					Username: "user",
-					Password: "pass",
-				},
-				scheme: "clickhouse",
-			},
-			"",
-		},
-		{
-			"native protocol with SRV lookup failure",
-			"clickhouse://user:pass@mydomain.com/test_database?srv_lookup=true",
-			nil,
-			"SRV lookup failed: simulated DNS failure",
-		},
-		{
-			"native protocol without SRV (multiple hosts fallback)",
-			"clickhouse://user:pass@host1,host2/test_database?srv_lookup=false",
-			&Options{
-				Protocol: Native,
-				TLS:      nil,
-				Addr:     []string{"host1", "host2"},
-				Settings: Settings{},
-				Auth: Auth{
-					Database: "test_database",
-					Username: "user",
-					Password: "pass",
-				},
-				scheme: "clickhouse",
 			},
 			"",
 		},
